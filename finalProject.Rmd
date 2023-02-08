@@ -1,0 +1,148 @@
+---
+title: "Practical Machine Learning - Final Project Report"
+author: "Kevin Wang"
+date: "2023-02-02"
+output: html_document
+---
+This is a final project report for **Johns Hopkins Bloomberg School of Public Health** Practical Machine Learning course on **Coursera**. 
+
+## Background 
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset). 
+
+## Data
+The training data for this project are available here: 
+
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+The test data are available here:
+
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+The data for this project come from this source: http://groupware.les.inf.puc-rio.br/har. If you use the document you create for this class for any purpose please cite them as they have been very generous in allowing their data to be used for this kind of assignment. 
+
+## Assignment 
+The goal of your project is to predict the manner in which they did the exercise. This is the "classe" variable in the training set. You may use any of the other variables to predict with. You should create a report describing how you built your model, how you used cross validation, what you think the expected out of sample error is, and why you made the choices you did. You will also use your prediction model to predict 20 different test cases. 
+Your submission for the Peer Review portion should consist of a link to a Github repo with your R markdown and compiled HTML file describing your analysis. Please constrain the text of the writeup to < 2000 words and the number of figures to be less than 5. It will make it easier for the graders if you submit a repo with a gh-pages branch so the HTML page can be viewed online (and you always want to make it easy on graders :-).
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+### Setup and Loading Data
+Includes packages that will be used throughout the assignment, the seed for reproducibility, and the data sources used for the project
+```{r }
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(caret,rpart, rpart.plot, rattle, parallel, doParallel,doMC,parallelly,dplyr)
+registerDoMC(detectCores())
+set.seed(19083)
+
+trainCsv <- read.csv(url("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"), na.strings=c("NA","#DIV/0!",""))
+testCsv <- read.csv(url("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"), na.strings=c("NA","#DIV/0!",""))
+
+```
+
+## Preprocessing and Data Cleaning
+Remove variable columns that are mostly NA, have near zero variance, and contain metadata that is irrelevant to predictions
+
+```{r }
+train <- trainCsv[,colMeans(is.na(trainCsv)) < .5]
+nzv <- nearZeroVar(train)
+train <- train[,-nzv]
+```
+Since index number {X}, user_names, num_window, and time stamps do not provide information on the outcome, we will remove columns 1:6
+```{r}
+train<- train[,-(1:6)]
+```
+Partition the training data on the outcome variable = classe so that a model can be trained and evaluated and used for predictions 
+I will then train models and pick the model with the best performance on the 20 validation samples and use it to predict on the test set
+```{r}
+inTrain <- createDataPartition(train$classe, p=0.75, list=FALSE)
+train <- train[inTrain, ]; valid <- train[-inTrain, ]
+dim(train); dim(valid)
+```
+Now that training and validation sets have the same 53 columns, apply the same changes to the testing set
+```{r}
+test <- testCsv[intersect(names(train), names(testCsv))]
+```
+
+##Creating Models
+Models for Decision Trees, Random Forests, and Boosting with Trees will be evaluated due to the classification nature of the problem. 
+
+### Decision Trees
+```{r Decision Tree}
+treeMod <- train(classe~., data = train, method ="rpart")
+fancyRpartPlot(treeMod$finalModel)
+
+#predictions 
+treePreds <- predict(treeMod, valid)
+treeCM <- confusionMatrix(treePreds, factor(valid$classe))
+treeCM
+```
+### Random Forest
+
+The purpose of the cross validation is to prevent over fitting as a result of random forest classification. We will use 10 folds repeated 3 times and a tune length of 5 to find the optimal # of predictors to use for classification. varImp will show which variables are the most important when classifying similarly to decision trees. 
+```{r Random Forest, cache = TRUE}
+ctrl <-  trainControl(method="repeatedcv", number=10,repeats = 3 ,verboseIter=T)
+
+rfModr <- train(classe~., trControl = ctrl, method ="rf", data = train, tuneLength = 5)
+rfModr$finalModel
+#predictions 
+rfPredsr <- predict(rfModr, valid)
+rfCMr<- confusionMatrix(rfPredsr, factor(valid$classe)) %>% print()
+
+plot(varImp(rfModr))
+plot(rfModr)
+```
+
+### Boosting with Trees
+Here, the same 10 fold repeated 3 times with tune length of 5 is used for tree boosting algorithm. The only difference is that the gbm training method uses n = 250 trees while "rf" uses n = 500. 
+```{r Boosting, cache = TRUE}
+ctrl <-  trainControl(method="repeatedcv", number=10,repeats = 3 ,verboseIter=T)
+boostMod <- train(classe ~., data = train, method = "gbm", trControl = ctrl, tuneLength = 5)
+boostMod
+boostPreds <- predict(boostMod, valid)
+boostCM <- confusionMatrix(boostPreds, factor(valid$classe)) %>% print()
+plot(boostMod)
+```
+
+### Accuracy and Performance
+```{r Accuracy & Performance}
+library(knitr)
+#helper function for random forest OOB sample error
+computeOOBErrEst <- function (x)
+{
+  cm <- x$confusion
+  cm <- cm[, -ncol(cm)]
+  1 - sum(diag(cm)) / sum(cm)
+}
+
+# Create a data frame to store the results
+results <- data.frame(model = c("Decision Tree", "Random Forest", "Boosted Tree"),
+                      accuracy = c(treeCM$overall[1], rfCMr$overall[1], boostCM$overall[1]),
+                      error = c(1 - treeCM$overall[1], computeOOBErrEst(rfModr$finalModel), 1 - boostCM$overall[1]))
+
+# Format the accuracy and error columns as percentages
+results$accuracy <- round(results$accuracy * 100, 2)
+results$error <- round(results$error * 100, 2)
+
+# View the results
+kable(results, caption = "Model Performance and Out of Sample Error Rate", col.names = c("Model", "Accuracy (%)", "OOS Error (%)"))
+```
+### Model Selection and Test Predictions 
+
+Because Random Forest and Boosted Trees have the highest performance, I will first evaluate whether there will be differences in the predictions on the test set. If the predicted values differ for the Random Forest and Boosted Tree, I will use the predicted values from the Random Forest. The reason for using values that agree is because those values have higher confidence in being the right prediction as it was returned by 2 different models. If they do not agree, we'll take the value from the model with slightly higher accuracy. 
+```{r}
+rfTestPreds <- predict(rfModr, test)
+boostTestPreds <- predict(boostMod, test)
+
+
+finalPreds <- sapply(1:length(boostTestPreds), function(i) {
+  if (boostPreds[i] == rfPredsr[i]) {
+    return(boostTestPreds[i])
+  } else {
+    return(rfTestPreds[i])
+  }
+})
+print(finalPreds)
+```
